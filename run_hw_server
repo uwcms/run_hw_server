@@ -1,0 +1,161 @@
+#!/usr/bin/python3
+
+import argparse
+import hashlib
+import os
+import pwd
+import re
+import shlex
+import shutil
+import socket
+import sys
+import time
+from decimal import Decimal
+from typing import Dict, Tuple
+
+# Generate a port by hash of the userid to distribute user servers, while
+# maintaining some internal consistency to each person's experience.
+baseport = int(hashlib.new('sha256', str(os.getuid()).encode('utf8')).hexdigest()[0:3], 16) + 4000
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    '-p',
+    '--port-offset',
+    action='store',
+    type=int,
+    default=0,
+    metavar='OFFSET',
+    help=
+    'Add this value to your user-specific default port (yours is {baseport}) to choose the hw_server port.  Range: 0-50.  Default: 0'
+    .format(baseport=baseport),
+)
+parser.add_argument(
+    '-d',
+    '--daemonize',
+    action='store_true',
+    help='Ask the hw_server to daemonize.  Default: Don\'t',
+)
+parser.add_argument(
+    '-I',
+    '--idle-seconds',
+    action='store',
+    type=int,
+    default=43200,
+    metavar='SECONDS',
+    help='How long can the server be unused before it exits?  Default: 12 hours',
+)
+parser.add_argument(
+    '-x',
+    '--xvc-target',
+    action='store',
+    type=str,
+    default=None,
+    metavar='XVC_IP_ADDR:2542',
+    help='The ip:port of an XVC target to connect to.  Port is optional.  Default: No XVC'
+)
+parser.add_argument(
+    '-b',
+    '--bind-address',
+    action='store',
+    default='0.0.0.0',
+    metavar='IP',
+    help=
+    'The IP address that hw_server will listen on, or 0.0.0.0 for "listen on all local addresses".  Default: 0.0.0.0',
+)
+ARGS = parser.parse_args()
+
+if ARGS.port_offset < 0 or 50 < ARGS.port_offset:
+	print('--port-offset must be within the range of 0-50', file=sys.stderr)
+	raise SystemExit(1)
+
+
+def load_listeners() -> Dict[int, Tuple[int, int]]:
+	out: Dict[int, Tuple[int, int]] = {}
+	with open('/proc/net/tcp', 'r') as fd:
+		#  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+		#  27: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 19122 1 0000000000000000 100 0 0 10 0
+		for line in fd:
+			fields: Dict[str, str] = dict(
+			    zip(
+			        'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode'.
+			        split(' '), re.split(r'\s+', line.strip())
+			    )
+			)
+			if fields['sl'] == 'sl':
+				continue  # discard the header
+
+			if fields['st'] != '0A':
+				continue  # Not in 'listening' state.
+
+			port = int(fields['local_address'].split(':')[1], 16)
+			uid = int(fields['uid'])
+			inode = int(fields['inode'])
+			out[port] = (uid, inode)
+	return out
+
+
+ports_in_use = load_listeners()
+
+port = baseport + ARGS.port_offset
+while port in ports_in_use:
+	portuser = 'user ' + str(ports_in_use[port][0])
+	try:
+		portuser = pwd.getpwuid(ports_in_use[port][0]).pw_name
+	except KeyError:
+		pass
+	print('Port {port} is in use by {user}.'.format(port=port, user=portuser))
+	port += 1
+
+server_cmd = [
+    'hw_server',
+    '-I',
+    str(ARGS.idle_seconds if ARGS.idle_seconds > 0 else 12 * 3600),
+    '-s',
+    'tcp:{bind}:{port}'.format(bind=ARGS.bind_address, port=port),
+]
+if ARGS.daemonize:
+	server_cmd.append('-d')
+if ARGS.xvc_target is not None:
+	if ':' in ARGS.xvc_target:
+		xvcip, xvcport = ARGS.xvc_target.split(':', 1)
+	else:
+		xvcip, xvcport = (ARGS.xvc_target, '2542')
+	try:
+		xvcip = socket.gethostbyname(xvcip)
+	except socket.gaierror as e:
+		print('Error looking up the IP address for the XVC target: ' + str(e), file=sys.stderr)
+		raise SystemExit(1)
+	server_cmd.extend(['-e', 'set auto-open-servers xilinx-xvc:{xvcip}:{xvcport}'.format(xvcip=xvcip, xvcport=xvcport)])
+
+hw_server_path = shutil.which('hw_server')
+if hw_server_path is None:
+	print('hw_server not found.', file=sys.stderr)
+	print('You must source the appropriate Vivado/Vitis/ISE/SDK environment.', file=sys.stderr)
+	raise SystemExit(1)
+
+
+def warning_delay(delay: int = 10):
+	for i in range(0, delay):
+		print('.', end='')
+		sys.stdout.flush()
+		time.sleep(1)
+	if delay:
+		print()
+
+
+version_components = re.findall(r'/(?:([0-9]+\.[0-9]+)(?:\.[0-9]+)?)/', hw_server_path)
+ver = Decimal(0)
+try:
+	ver = Decimal(version_components[-1])
+except:
+	pass
+if not ver:
+	print('WARNING: It was not possible to verify your hw_server version.', file=sys.stderr)
+	print('Verify that you have sourced the appropriate Vivado/Vitis/ISE/SDK environment.', file=sys.stderr)
+	warning_delay()
+elif ver < Decimal('2014.4') and ARGS.xvc_target:
+	print('WARNING: Your hw_server may be too old for XVC.', file=sys.stderr)
+	warning_delay()
+
+print('Launching: ' + ' '.join(shlex.quote(x) if ' ' in x else x for x in server_cmd))
+os.execvp(server_cmd[0], server_cmd)

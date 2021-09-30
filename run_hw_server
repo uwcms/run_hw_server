@@ -134,6 +134,35 @@ if hw_server_path is None:
 	raise SystemExit(1)
 
 
+def font_render(line: str) -> str:
+	# font smblock from `toilet` (a `figlet`-alike)
+	font = {
+	    'P': ['▛▀▖', '▙▄▘', '▌  ', '▘  '],
+	    'o': ['   ', '▞▀▖', '▌ ▌', '▝▀ '],
+	    'r': ['   ', '▙▀▖', '▌  ', '▘  '],
+	    't': ['▐  ', '▜▀ ', '▐ ▖', ' ▀ '],
+	    ' ': ['   ', '   ', '   ', '   '],
+	    '0': ['▞▀▖', '▌▞▌', '▛ ▌', '▝▀ '],
+	    '1': ['▗▌ ', '▌ ', ' ▌ ', '▝▀ '],
+	    '2': ['▞▀▖', ' ▗▘', '▗▘ ', '▀▀▘'],
+	    '3': ['▞▀▖', ' ▄▘', '▖ ▌', '▝▀ '],
+	    '4': ['▌ ▌', '▚▄▌', '  ▌', '  ▘'],
+	    '5': ['▛▀▘', '▙▄ ', '▖ ▌', '▝▀ '],
+	    '6': ['▞▀▖', '▙▄ ', '▌ ▌', '▝▀ '],
+	    '7': ['▛▀▌', ' ▐ ', ' ▌ ', ' ▘ '],
+	    '8': ['▞▀▖', '▚▄▘', '▌ ▌', '▝▀ '],
+	    '9': ['▞▀▖', '▚▄▌', '▖ ▌', '▝▀ ']
+	}
+	lines = ['', '', '', '']
+	for c in line:
+		for l in range(0, 4):
+			lines[l] += font[c][l]
+	return '\n'.join(lines)
+
+
+print('\n' + font_render('Port ' + str(port)) + '\n')
+
+
 def warning_delay(delay: int = 10):
 	for i in range(0, delay):
 		print('.', end='')

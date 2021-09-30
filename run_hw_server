@@ -11,7 +11,6 @@ import socket
 import sys
 import time
 from decimal import Decimal
-from typing import Dict, Tuple
 
 # Generate a port by hash of the userid to distribute user servers, while
 # maintaining some internal consistency to each person's experience.
@@ -69,13 +68,13 @@ if ARGS.port_offset < 0 or 50 < ARGS.port_offset:
 	raise SystemExit(1)
 
 
-def load_listeners() -> Dict[int, Tuple[int, int]]:
-	out: Dict[int, Tuple[int, int]] = {}
+def load_listeners():
+	out = {}
 	with open('/proc/net/tcp', 'r') as fd:
 		#  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
 		#  27: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 19122 1 0000000000000000 100 0 0 10 0
 		for line in fd:
-			fields: Dict[str, str] = dict(
+			fields = dict(
 			    zip(
 			        'sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode'.
 			        split(' '), re.split(r'\s+', line.strip())
@@ -134,7 +133,7 @@ if hw_server_path is None:
 	raise SystemExit(1)
 
 
-def font_render(line: str) -> str:
+def font_render(line):
 	# font smblock from `toilet` (a `figlet`-alike)
 	font = {
 	    'P': ['▛▀▖', '▙▄▘', '▌  ', '▘  '],
@@ -163,7 +162,7 @@ def font_render(line: str) -> str:
 print('\n' + font_render('Port ' + str(port)) + '\n')
 
 
-def warning_delay(delay: int = 10):
+def warning_delay(delay=10):
 	for i in range(0, delay):
 		print('.', end='')
 		sys.stdout.flush()

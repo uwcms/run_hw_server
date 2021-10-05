@@ -82,6 +82,12 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    '-f',
+    '--force',
+    action='store_true',
+    help='Do potentially problematic things.',
+)
+parser.add_argument(
     '-X',
     '--xsdb',
     nargs='?',
@@ -242,6 +248,28 @@ def font_render(line):
 
 
 def load_listeners():
+	procfd = {}
+	for pid in os.listdir('/proc'):
+		if re.match(r'^[0-9]+$', pid) is None:
+			continue
+		pid = int(pid)
+		try:
+			pidname = None
+			try:
+				pidname = os.readlink('/proc/{pid}/exe'.format(pid=pid))
+				pidname = os.path.basename(pidname)
+			except Exception:
+				pass
+			for fd in os.listdir('/proc/{pid}/fd'.format(pid=pid)):
+				try:
+					target = os.readlink('/proc/{pid}/fd/{fd}'.format(pid=pid, fd=fd))
+					m = re.match(r'^socket:\[([0-9]+)\]$', target)
+					if m is not None:
+						procfd[int(m.group(1))] = (pid, pidname)
+				except FileNotFoundError:
+					pass
+		except (PermissionError, FileNotFoundError):
+			pass
 	out = {}
 	with open('/proc/net/tcp', 'r') as fd:
 		#  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
@@ -262,7 +290,7 @@ def load_listeners():
 			port = int(fields['local_address'].split(':')[1], 16)
 			uid = int(fields['uid'])
 			inode = int(fields['inode'])
-			out[port] = (uid, inode)
+			out[port] = (uid, inode, procfd.get(inode, (None, None)))
 	return out
 
 
@@ -270,12 +298,17 @@ ports_in_use = load_listeners()
 
 
 def warning_delay(delay=10, file=sys.stdout):
-	for i in range(0, delay):
-		print('.', end='', file=file)
-		file.flush()
-		time.sleep(1)
-	if delay:
-		print()
+	if not delay:
+		return
+	try:
+		print('Continuing in', end=' ')
+		for i in range(0, delay):
+			print(str(delay - i) + '...', end=' ', file=file)
+			file.flush()
+			time.sleep(1)
+		print('')
+	except KeyboardInterrupt:
+		raise SystemExit(1)
 
 
 def verify_version():
@@ -283,7 +316,7 @@ def verify_version():
 	ver = Decimal(0)
 	try:
 		ver = Decimal(version_components[-1])
-	except:
+	except Exception:
 		pass
 	if not ver:
 		print(font_render('* WARNING *'), file=sys.stderr)
@@ -293,7 +326,11 @@ def verify_version():
 	elif ver < Decimal('2014.4') and ARGS.xvc_target:
 		print(font_render('* WARNING *'), file=sys.stderr)
 		print('WARNING: Your hw_server may be too old for XVC.', file=sys.stderr)
-		warning_delay()
+		if not ARGS.force:
+			print('Use --force to proceed.', file=sys.stderr)
+			raise SystemExit(1)
+		else:
+			warning_delay()
 
 
 verify_version()
@@ -302,11 +339,16 @@ server_cmd = []
 if ARGS.xsdb is None or ARGS.xsdb is True:
 	port = baseport + ARGS.port_offset
 	while port in ports_in_use:
-		portuser = 'user ' + str(ports_in_use[port][0])
+		portinfo = ports_in_use[port]
+		portuser = 'user ' + str(portinfo[0])
 		try:
-			portuser = pwd.getpwuid(ports_in_use[port][0]).pw_name
+			portuser = pwd.getpwuid(portinfo[0]).pw_name
 		except KeyError:
 			pass
+		if portinfo[2][1] is not None:
+			portuser += ': {exe} (pid {pid})'.format(exe=portinfo[2][1], pid=portinfo[2][0])
+		elif portinfo[2][0] is not None:
+			portuser += ': (pid {pid})'.format(pid=portinfo[2][0])
 		print('Port {port} is in use by {user}.'.format(port=port, user=portuser))
 		port += 1
 
@@ -344,8 +386,64 @@ else:  # xsdb with target port
 	port = ARGS.xsdb
 	if port not in ports_in_use:
 		print(font_render('* WARNING *'), file=sys.stderr)
-		print('WARNING: There is no process listening locally on port {port}.'.format(port=port))
-		warning_delay()
+		print('WARNING: There is no process listening locally on port {port}.'.format(port=port), file=sys.stderr)
+		if ARGS.bind_address in ('127.0.0.1', '0.0.0.0'):
+			print('We are connecting locally.  Refusing to proceed.')
+			raise SystemExit(1)
+		else:
+			warning_delay()
+	elif ports_in_use[port][0] != os.getuid():
+		print(font_render('* WARNING *'), file=sys.stderr)
+		user = 'user ' + str(ports_in_use[port][0])
+		try:
+			user = pwd.getpwuid(ports_in_use[port][0]).pw_name
+		except Exception:
+			pass
+		if ports_in_use[port][2][1] is not None:
+			print(
+			    'WARNING: The {exe} process (pid {pid}) listening locally on {port} belongs to {user}.'.format(
+			        port=port, user=user, exe=ports_in_use[port][2][1], pid=ports_in_use[port][2][0]
+			    ),
+			    file=sys.stderr
+			)
+		elif ports_in_use[port][2][0] is not None:
+			print(
+			    'WARNING: The process (pid {pid}) listening locally on {port} belongs to {user}.'.format(
+			        port=port, user=user, pid=ports_in_use[port][2][0]
+			    ),
+			    file=sys.stderr
+			)
+		else:
+			print(
+			    'WARNING: The process listening locally on {port} belongs to {user}.'.format(port=port, user=user),
+			    file=sys.stderr
+			)
+		if not ARGS.force:
+			print('Use --force to proceed.', file=sys.stderr)
+			raise SystemExit(1)
+		else:
+			warning_delay()
+	elif ports_in_use[port][2][1] is not None and ports_in_use[port][2][1] != 'hw_server':
+		print(font_render('* WARNING *'), file=sys.stderr)
+		user = 'user ' + str(ports_in_use[port][0])
+		try:
+			user = pwd.getpwuid(ports_in_use[port][0]).pw_name
+		except Exception:
+			pass
+		print(
+		    'WARNING: The {exe} process (pid {pid}) listening locally on {port} is not a hw_server!'.format(
+		        port=port, user=user, exe=ports_in_use[port][2][1], pid=ports_in_use[port][2][0]
+		    ),
+		    file=sys.stderr
+		)
+		if ARGS.bind_address in ('127.0.0.1', '0.0.0.0'):
+			print('We are connecting locally.  Refusing to proceed.')
+			raise SystemExit(1)
+		elif not ARGS.force:
+			print('Use --force to proceed.', file=sys.stderr)
+			raise SystemExit(1)
+		else:
+			warning_delay()
 
 # If we've gotten this far, the hw_server is launched if needed.
 # If we've gotten this far, the xsdb process _is_ needed. (we didn't execvp before)

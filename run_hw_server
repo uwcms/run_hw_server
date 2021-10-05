@@ -8,15 +8,17 @@ import re
 import shlex
 import shutil
 import socket
+import subprocess
 import sys
 import time
 from decimal import Decimal
+from textwrap import dedent
 
 # Generate a port by hash of the userid to distribute user servers, while
 # maintaining some internal consistency to each person's experience.
 baseport = int(hashlib.new('sha256', str(os.getuid()).encode('utf8')).hexdigest()[0:3], 16) + 4000
 
-parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
 parser.add_argument(
     '-p',
     '--port-offset',
@@ -24,24 +26,34 @@ parser.add_argument(
     type=int,
     default=0,
     metavar='OFFSET',
-    help=
-    'Add this value to your user-specific default port (yours is {baseport}) to choose the hw_server port.  Range: 0-50.  Default: 0'
-    .format(baseport=baseport),
+    help=dedent(
+        '''\
+	Add this value to your user-specific default port
+	(yours is {baseport}) to choose the hw_server port.
+	Range: 0-50.  Default: 0
+	'''
+    ).format(baseport=baseport),
 )
 parser.add_argument(
     '-d',
     '--daemonize',
     action='store_true',
-    help='Ask the hw_server to daemonize.  Default: Don\'t',
+    help=dedent('''\
+	Ask the hw_server to daemonize.
+	Default: Don't.
+	'''),
 )
 parser.add_argument(
     '-I',
     '--idle-seconds',
     action='store',
     type=int,
-    default=43200,
+    default=None,
     metavar='SECONDS',
-    help='How long can the server be unused before it exits?  Default: 12 hours',
+    help=dedent('''\
+	How long can the server be unused before it exits?
+	Default: 12 hours
+	'''),
 )
 parser.add_argument(
     '-x',
@@ -50,7 +62,10 @@ parser.add_argument(
     type=str,
     default=None,
     metavar='XVC_IP_ADDR:2542',
-    help='The ip:port of an XVC target to connect to.  Port is optional.  Default: No XVC'
+    help=dedent('''\
+	The ip:port of an XVC target to connect to.
+	The port is optional.  Default: No XVC
+	'''),
 )
 parser.add_argument(
     '-b',
@@ -58,14 +73,172 @@ parser.add_argument(
     action='store',
     default='127.0.0.1',
     metavar='IP',
-    help=
-    'The IP address that hw_server will listen on, or 0.0.0.0 for "listen on all local addresses".  Default: 127.0.0.1',
+    help=dedent(
+        '''\
+	The IP address that hw_server will listen on, or 0.0.0.0
+	for "listen on all local addresses".
+	Default: 127.0.0.1
+	'''
+    ),
+)
+parser.add_argument(
+    '-X',
+    '--xsdb',
+    nargs='?',
+    default=None,
+    const=True,
+    type=int,
+    metavar='[HW_SERVER_PORT]',
+    help=dedent(
+        '''\
+	If a port is supplied:
+	  Do not start hw_server.
+	  Start xsdb connected to the hw_server at that port.
+	If no port is supplied:
+	  Launch a hw_server as usual, then launch xsdb for it.
+	  This changes the default value for -I to 10.
+	  This implies -d so xsdb can have the foreground.
+	'''
+    ),
 )
 ARGS = parser.parse_args()
 
 if ARGS.port_offset < 0 or 50 < ARGS.port_offset:
 	print('--port-offset must be within the range of 0-50', file=sys.stderr)
 	raise SystemExit(1)
+
+if ARGS.idle_seconds is None:
+	ARGS.idle_seconds = 10 if ARGS.xsdb else 43200
+
+hw_server_path = shutil.which('hw_server')
+if hw_server_path is None:
+	print('hw_server not found.', file=sys.stderr)
+	print('You must source the appropriate Vivado/Vitis/ISE/SDK environment.', file=sys.stderr)
+	raise SystemExit(1)
+assert hw_server_path is not None
+
+
+def font_render(line):
+	# font smblock from `toilet` (a `figlet`-alike)
+	# font = {
+	#     'P': ['▛▀▖', '▙▄▘', '▌  ', '▘  '],
+	#     'o': ['   ', '▞▀▖', '▌ ▌', '▝▀ '],
+	#     'r': ['   ', '▙▀▖', '▌  ', '▘  '],
+	#     't': ['▐  ', '▜▀ ', '▐ ▖', ' ▀ '],
+	#     ' ': ['   ', '   ', '   ', '   '],
+	#     '0': ['▞▀▖', '▌▞▌', '▛ ▌', '▝▀ '],
+	#     '1': ['▗▌ ', '▌ ', ' ▌ ', '▝▀ '],
+	#     '2': ['▞▀▖', ' ▗▘', '▗▘ ', '▀▀▘'],
+	#     '3': ['▞▀▖', ' ▄▘', '▖ ▌', '▝▀ '],
+	#     '4': ['▌ ▌', '▚▄▌', '  ▌', '  ▘'],
+	#     '5': ['▛▀▘', '▙▄ ', '▖ ▌', '▝▀ '],
+	#     '6': ['▞▀▖', '▙▄ ', '▌ ▌', '▝▀ '],
+	#     '7': ['▛▀▌', ' ▐ ', ' ▌ ', ' ▘ '],
+	#     '8': ['▞▀▖', '▚▄▘', '▌ ▌', '▝▀ '],
+	#     '9': ['▞▀▖', '▚▄▌', '▖ ▌', '▝▀ ']
+	# }
+	font = {
+	    ' ': ['  ', '  ', '  ', '  '],
+	    '!': ['▐ ', '▐ ', '▝ ', '▝ '],
+	    '"': ['▜▝▌', '▘▝ ', '   ', '   '],
+	    '#': ['   ', '▟▟▖', '▟▟▖', '▝▝ '],
+	    '$': ['▗▙▖', '▚▙ ', '▄▙▘', ' ▘ '],
+	    '%': ['█ ▌', ' ▞ ', '▞▗▖', '▘▝▘'],
+	    '&': ['▞▚ ', '▚  ', '▌▚▘', '▝▘▘'],
+	    "'": ['▝▌', '▝ ', '  ', '  '],
+	    '(': [' ▞ ', '▐  ', '▝▖ ', ' ▝ '],
+	    ')': ['▝▖ ', ' ▐ ', ' ▞ ', '▝  '],
+	    '*': [' ▖ ', '▚▙▘', '▘▌▘', '   '],
+	    '+': [' ▖ ', '▄▙▖', ' ▌ ', '   '],
+	    ',': ['  ', '  ', '▗▖', '▗▘'],
+	    '-': ['   ', '▄▄▖', '   ', '   '],
+	    '.': ['  ', '  ', '▗▖', '▝▘'],
+	    '/': ['  ▌', ' ▞ ', '▞  ', '▘  '],
+	    '0': ['▞▀▖', '▌▞▌', '▛ ▌', '▝▀ '],
+	    '1': ['▗▌ ', ' ▌ ', ' ▌ ', '▝▀ '],
+	    '2': ['▞▀▖', ' ▗▘', '▗▘ ', '▀▀▘'],
+	    '3': ['▞▀▖', ' ▄▘', '▖ ▌', '▝▀ '],
+	    '4': ['▌ ▌', '▚▄▌', '  ▌', '  ▘'],
+	    '5': ['▛▀▘', '▙▄ ', '▖ ▌', '▝▀ '],
+	    '6': ['▞▀▖', '▙▄ ', '▌ ▌', '▝▀ '],
+	    '7': ['▛▀▌', ' ▐ ', ' ▌ ', ' ▘ '],
+	    '8': ['▞▀▖', '▚▄▘', '▌ ▌', '▝▀ '],
+	    '9': ['▞▀▖', '▚▄▌', '▖ ▌', '▝▀ '],
+	    ':': ['  ', '▐▌', '▗▖', '▝▘'],
+	    ';': ['  ', '▐▌', '▗▖', '▗▘'],
+	    '<': ['  ▖', '▃▀ ', ' ▀▖', '   '],
+	    '=': ['   ', '▀▀▘', '▀▀▘', '   '],
+	    '>': ['▖  ', '▝▚▖', '▞▘ ', '   '],
+	    '?': ['▞▀▖', ' ▗▘', ' ▘ ', ' ▘ '],
+	    '@': ['▞▀▖', '▌▙▌', '▌▀ ', '▝▀ '],
+	    'A': ['▞▀▖', '▙▄▌', '▌ ▌', '▘ ▘'],
+	    'B': ['▛▀▖', '▙▄▘', '▌ ▌', '▀▀ '],
+	    'C': ['▞▀▖', '▌  ', '▌ ▖', '▝▀ '],
+	    'D': ['▛▀▖', '▌ ▌', '▌ ▌', '▀▀ '],
+	    'E': ['▛▀▘', '▙▄ ', '▌  ', '▀▀▘'],
+	    'F': ['▛▀▘', '▙▄ ', '▌  ', '▘  '],
+	    'G': ['▞▀▖', '▌▄▖', '▌ ▌', '▝▀ '],
+	    'H': ['▌ ▌', '▙▄▌', '▌ ▌', '▘ ▘'],
+	    'I': ['▜▘', '▐ ', '▐ ', '▀▘'],
+	    'J': [' ▜▘', ' ▐ ', '▌▐ ', '▝▘ '],
+	    'K': ['▌ ▌', '▙▞ ', '▌▝▖', '▘ ▘'],
+	    'L': ['▌  ', '▌  ', '▌  ', '▀▀▘'],
+	    'M': ['▙▗▌', '▌▘▌', '▌ ▌', '▘ ▘'],
+	    'N': ['▙ ▌', '▌▌▌', '▌▝▌', '▘ ▘'],
+	    'O': ['▞▀▖', '▌ ▌', '▌ ▌', '▝▀ '],
+	    'P': ['▛▀▖', '▙▄▘', '▌  ', '▘  '],
+	    'Q': ['▞▀▖', '▌ ▌', '▌▚▘', '▝▘▘'],
+	    'R': ['▛▀▖', '▙▄▘', '▌▚ ', '▘ ▘'],
+	    'S': ['▞▀▖', '▚▄ ', '▖ ▌', '▝▀ '],
+	    'T': ['▀▛▘', ' ▌ ', ' ▌ ', ' ▘ '],
+	    'U': ['▌ ▌', '▌ ▌', '▌ ▌', '▝▀ '],
+	    'V': ['▌ ▌', '▚▗▘', '▝▞ ', ' ▘ '],
+	    'W': ['▌ ▌', '▌▖▌', '▙▚▌', '▘ ▘'],
+	    'X': ['▌ ▌', '▝▞ ', '▞▝▖', '▘ ▘'],
+	    'Y': ['▌ ▌', '▝▞ ', ' ▌ ', ' ▘ '],
+	    'Z': ['▀▀▌', ' ▞ ', '▞  ', '▀▀▘'],
+	    '[': ['▐▀▘', '▐  ', '▐  ', '▝▀▘'],
+	    '\\': ['▌  ', '▝▖ ', ' ▝▖', '  ▘'],
+	    ']': ['▀▜ ', ' ▐ ', ' ▐ ', '▀▀ '],
+	    '^': ['▗▚ ', '▘ ▘', '   ', '   '],
+	    '_': ['   ', '   ', '   ', '▀▀▀'],
+	    '`': ['▚ ', ' ▘', '  ', '  '],
+	    'a': ['   ', '▝▀▖', '▞▀▌', '▝▀▘'],
+	    'b': ['▌  ', '▛▀▖', '▌ ▌', '▀▀ '],
+	    'c': ['   ', '▞▀▖', '▌ ▖', '▝▀ '],
+	    'd': ['  ▌', '▞▀▌', '▌ ▌', '▝▀▘'],
+	    'e': ['   ', '▞▀▖', '▛▀ ', '▝▀▘'],
+	    'f': ['▗▀▖', '▐  ', '▜▀ ', '▐  '],
+	    'g': ['   ', '▞▀▌', '▚▄▌', '▗▄▘'],
+	    'h': ['▌  ', '▛▀▖', '▌ ▌', '▘ ▘'],
+	    'i': ['▗ ', '▄ ', '▐ ', '▀▘'],
+	    'j': [' ▖', '▗▖', ' ▌', '▄▘'],
+	    'k': ['▌  ', '▌▗▘', '▛▚ ', '▘ ▘'],
+	    'l': ['▜ ', '▐ ', '▐ ', ' ▘'],
+	    'm': ['    ', '▛▚▀▖', '▌▐ ▌', '▘▝ ▘'],
+	    'n': ['   ', '▛▀▖', '▌ ▌', '▘ ▘'],
+	    'o': ['   ', '▞▀▖', '▌ ▌', '▝▀ '],
+	    'p': ['   ', '▛▀▖', '▙▄▘', '▌  '],
+	    'q': ['   ', '▞▀▌', '▚▄▌', '  ▌'],
+	    'r': ['   ', '▙▀▖', '▌  ', '▘  '],
+	    's': ['   ', '▞▀▘', '▝▀▖', '▀▀ '],
+	    't': ['▐  ', '▜▀ ', '▐ ▖', ' ▀ '],
+	    'u': ['   ', '▌ ▌', '▌ ▌', '▝▀▘'],
+	    'v': ['   ', '▌ ▌', '▐▐ ', ' ▘ '],
+	    'w': ['    ', '▌  ▌', '▐▐▐ ', ' ▘▘ '],
+	    'x': ['   ', '▚▗▘', '▗▚ ', '▘ ▘'],
+	    'y': ['   ', '▌ ▌', '▚▄▌', '▗▄▘'],
+	    'z': ['   ', '▀▜▘', '▗▘ ', '▀▀▘'],
+	    '{': ['▗▀ ', '▞  ', '▐  ', ' ▀ '],
+	    '|': ['▐ ', '▐ ', '▐ ', '▝ '],
+	    '}': ['▝▚ ', ' ▝▖', ' ▐ ', '▝▘ '],
+	    '~': ['   ', '▗▖▖', '▘▝ ', '   ']
+	}
+	lines = ['', '', '', '']
+	for c in line:
+		for l in range(0, 4):
+			lines[l] += font[c][l]
+	return '\n'.join(lines)
 
 
 def load_listeners():
@@ -95,95 +268,96 @@ def load_listeners():
 
 ports_in_use = load_listeners()
 
-port = baseport + ARGS.port_offset
-while port in ports_in_use:
-	portuser = 'user ' + str(ports_in_use[port][0])
-	try:
-		portuser = pwd.getpwuid(ports_in_use[port][0]).pw_name
-	except KeyError:
-		pass
-	print('Port {port} is in use by {user}.'.format(port=port, user=portuser))
-	port += 1
 
-server_cmd = [
-    'hw_server',
-    '-I',
-    str(ARGS.idle_seconds if ARGS.idle_seconds > 0 else 12 * 3600),
-    '-s',
-    'tcp:{bind}:{port}'.format(bind=ARGS.bind_address, port=port),
-]
-if ARGS.daemonize:
-	server_cmd.append('-d')
-if ARGS.xvc_target is not None:
-	if ':' in ARGS.xvc_target:
-		xvcip, xvcport = ARGS.xvc_target.split(':', 1)
-	else:
-		xvcip, xvcport = (ARGS.xvc_target, '2542')
-	try:
-		xvcip = socket.gethostbyname(xvcip)
-	except socket.gaierror as e:
-		print('Error looking up the IP address for the XVC target: ' + str(e), file=sys.stderr)
-		raise SystemExit(1)
-	server_cmd.extend(['-e', 'set auto-open-servers xilinx-xvc:{xvcip}:{xvcport}'.format(xvcip=xvcip, xvcport=xvcport)])
-
-hw_server_path = shutil.which('hw_server')
-if hw_server_path is None:
-	print('hw_server not found.', file=sys.stderr)
-	print('You must source the appropriate Vivado/Vitis/ISE/SDK environment.', file=sys.stderr)
-	raise SystemExit(1)
-
-
-def font_render(line):
-	# font smblock from `toilet` (a `figlet`-alike)
-	font = {
-	    'P': ['▛▀▖', '▙▄▘', '▌  ', '▘  '],
-	    'o': ['   ', '▞▀▖', '▌ ▌', '▝▀ '],
-	    'r': ['   ', '▙▀▖', '▌  ', '▘  '],
-	    't': ['▐  ', '▜▀ ', '▐ ▖', ' ▀ '],
-	    ' ': ['   ', '   ', '   ', '   '],
-	    '0': ['▞▀▖', '▌▞▌', '▛ ▌', '▝▀ '],
-	    '1': ['▗▌ ', '▌ ', ' ▌ ', '▝▀ '],
-	    '2': ['▞▀▖', ' ▗▘', '▗▘ ', '▀▀▘'],
-	    '3': ['▞▀▖', ' ▄▘', '▖ ▌', '▝▀ '],
-	    '4': ['▌ ▌', '▚▄▌', '  ▌', '  ▘'],
-	    '5': ['▛▀▘', '▙▄ ', '▖ ▌', '▝▀ '],
-	    '6': ['▞▀▖', '▙▄ ', '▌ ▌', '▝▀ '],
-	    '7': ['▛▀▌', ' ▐ ', ' ▌ ', ' ▘ '],
-	    '8': ['▞▀▖', '▚▄▘', '▌ ▌', '▝▀ '],
-	    '9': ['▞▀▖', '▚▄▌', '▖ ▌', '▝▀ ']
-	}
-	lines = ['', '', '', '']
-	for c in line:
-		for l in range(0, 4):
-			lines[l] += font[c][l]
-	return '\n'.join(lines)
-
-
-print('\n' + font_render('Port ' + str(port)) + '\n')
-
-
-def warning_delay(delay=10):
+def warning_delay(delay=10, file=sys.stdout):
 	for i in range(0, delay):
-		print('.', end='')
-		sys.stdout.flush()
+		print('.', end='', file=file)
+		file.flush()
 		time.sleep(1)
 	if delay:
 		print()
 
 
-version_components = re.findall(r'/(?:([0-9]+\.[0-9]+)(?:\.[0-9]+)?)/', hw_server_path)
-ver = Decimal(0)
-try:
-	ver = Decimal(version_components[-1])
-except:
-	pass
-if not ver:
-	print('WARNING: It was not possible to verify your hw_server version.', file=sys.stderr)
-	print('Verify that you have sourced the appropriate Vivado/Vitis/ISE/SDK environment.', file=sys.stderr)
-	warning_delay()
-elif ver < Decimal('2014.4') and ARGS.xvc_target:
-	print('WARNING: Your hw_server may be too old for XVC.', file=sys.stderr)
-	warning_delay()
+def verify_version():
+	version_components = re.findall(r'/(?:([0-9]+\.[0-9]+)(?:\.[0-9]+)?)/', hw_server_path)
+	ver = Decimal(0)
+	try:
+		ver = Decimal(version_components[-1])
+	except:
+		pass
+	if not ver:
+		print(font_render('* WARNING *'), file=sys.stderr)
+		print('WARNING: It was not possible to verify your hw_server version.', file=sys.stderr)
+		print('Verify that you have sourced the appropriate Vivado/Vitis/ISE/SDK environment.', file=sys.stderr)
+		warning_delay()
+	elif ver < Decimal('2014.4') and ARGS.xvc_target:
+		print(font_render('* WARNING *'), file=sys.stderr)
+		print('WARNING: Your hw_server may be too old for XVC.', file=sys.stderr)
+		warning_delay()
 
-print('Launching: ' + ' '.join(shlex.quote(x) if ' ' in x else x for x in server_cmd))
-os.execvp(server_cmd[0], server_cmd)
+
+verify_version()
+
+server_cmd = []
+if ARGS.xsdb is None or ARGS.xsdb is True:
+	port = baseport + ARGS.port_offset
+	while port in ports_in_use:
+		portuser = 'user ' + str(ports_in_use[port][0])
+		try:
+			portuser = pwd.getpwuid(ports_in_use[port][0]).pw_name
+		except KeyError:
+			pass
+		print('Port {port} is in use by {user}.'.format(port=port, user=portuser))
+		port += 1
+
+	server_cmd = [
+	    'hw_server',
+	    '-I',
+	    str(ARGS.idle_seconds if ARGS.idle_seconds > 0 else 12 * 3600),
+	    '-s',
+	    'tcp:{bind}:{port}'.format(bind=ARGS.bind_address, port=port),
+	]
+	if ARGS.daemonize or ARGS.xsdb is not None:
+		server_cmd.append('-d')
+	if ARGS.xvc_target is not None:
+		if ':' in ARGS.xvc_target:
+			xvcip, xvcport = ARGS.xvc_target.split(':', 1)
+		else:
+			xvcip, xvcport = (ARGS.xvc_target, '2542')
+		try:
+			xvcip = socket.gethostbyname(xvcip)
+		except socket.gaierror as e:
+			print('Error looking up the IP address for the XVC target: ' + str(e), file=sys.stderr)
+			raise SystemExit(1)
+		server_cmd.extend([
+		    '-e', 'set auto-open-servers xilinx-xvc:{xvcip}:{xvcport}'.format(xvcip=xvcip, xvcport=xvcport)
+		])
+	print('\n' + font_render('Port ' + str(port)) + '\n')
+	print('Launching: ' + ' '.join(shlex.quote(x) if ' ' in x else x for x in server_cmd))
+	if ARGS.xsdb is None:
+		os.execvp(server_cmd[0], server_cmd)
+	else:
+		subprocess.call(server_cmd)
+		print()
+
+else:  # xsdb with target port
+	port = ARGS.xsdb
+	if port not in ports_in_use:
+		print(font_render('* WARNING *'), file=sys.stderr)
+		print('WARNING: There is no process listening locally on port {port}.'.format(port=port))
+		warning_delay()
+
+# If we've gotten this far, the hw_server is launched if needed.
+# If we've gotten this far, the xsdb process _is_ needed. (we didn't execvp before)
+
+xsdb_cmd = [
+    'xsdb',
+    '-interactive',
+    '-eval',
+    'connect -host {bindip} -port {port}'.format(
+        bindip=ARGS.bind_address if ARGS.bind_address != '0.0.0.0' else '127.0.0.1',
+        port=port,
+    ),
+]
+print('Launching: ' + ' '.join(shlex.quote(x) if ' ' in x else x for x in xsdb_cmd))
+os.execvp(xsdb_cmd[0], xsdb_cmd)
